@@ -1,0 +1,257 @@
+---
+title: "Untitled"
+author: "testing"
+date: "3/30/2022"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# DATA ANALYSIS AND INTERPRETATION OF RESULT
+
+## BACKGROUND OF THE STUDY
+In this study, our interest is to determine the investment nature and performance of company based on their respective historical aspiration levels.
+To achieve the aim of this study, we will consider answering three questions which include:
+(1) to what extent are firm’s investments in R&D static or dynamic over time?
+(2) To what extent does firms’ performance below their historical aspiration level (i.e., negative performance feedback) induce change in R&D investment?
+(3) To what extent does increasing R&D investment spur organizational performance
+
+To achieve the desirable answers, we consider the use of means plot and panel data analysis (because we have both the cross-sectional and time series factor)
+to determine how the investment of companies vary over distinctive time. The hypothesis to be adressed are:
+
+1- Ho: Negative feedback does not impact R&D investment
+2- Ho: Increasing R&D investment does not impact organization performance.
+
+With answer to the first question being observed from the means plot, the first and second hypothesis will be subjected to pooled OLS of the plm package. The coefficient of each model will indicate the impact of the independent variable on the dependent variable.Their respective p-values indicate the significant level of the predictors.
+
+
+## LOADING REQUIRED LIBRARIES
+```{r, warning=FALSE, message=FALSE}
+library(readxl)         # for reading in our excel data
+library(fastDummies)    # to automatically generate yearly dummy variables
+library(plm)            # for fitting panel linear models
+library(tidyverse)      # For data wrangling
+library(stargazer)      # For tidying model output
+library(psych)          # for tidying results and tables
+library(gplots)         # for means plot
+library(collapse)       # for finding panel differences
+library(gsubfn)         # for finding panel difference functions
+library(ExPanDaR)       # for treating outliers
+library(tseries)        # for unit root testing
+```
+
+
+##   DATA WRANGLING
+```{r}
+rd.data = read_excel(file.choose())    # we navigate to the data source folder
+str(rd.data)                           # to check the structure of our data
+```
+The structure of the original data is shown above, it is evident that there are 43,657 observation across 27 different measures one of which is the Global company key and the Data fiscal year. The distribution of data has both the cross-section and time series feature which indicates that this is a panel data structure and can best be modeled using panel data analysis technique.
+To  achieve this, we will use the Data year -fiscal variable and the company name is unique identity for the panel data distribution; However it is observed that this identity are not unique due to some duplications which we will average to avoid loss of information.
+```{r}
+# this data has duplicate which will lead to error in panel data models, thus we will remove the duplicates by taking the average of all duplicates for an identifier
+
+rd.data2 = rd.data %>% group_by(`Data Year - Fiscal`,`Company Name`) %>% summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% data.frame()
+str(rd.data2)
+```
+To remove duplications, we use the dplyr package to find the average across all numeric variables based on grouping with the desired identity variables (Date and company name). The result is shows that we are left with 43591 unique observations across 26 variables, 24 of which are numeric while the Data.year.fiscal variable is a date and the company name is character variable.
+
+### Variable Generation
+Having treated the duplications in the raw dataset, we will proceed to the derivation of various financial variables needed for our analysis.
+
+**Lag R&D**
+
+To determine if R&D investment is dynamic or static over time, we will adopt the one year for short time and three year lag approach for the long term dynamicity. The 1-year and 3-year lagged variables are generated as follow:
+
+```{r}
+rd.data3<-rd.data2%>%arrange(Global.Company.Key,Data.Year...Fiscal)
+
+rd.data3<-rd.data3%>%
+  group_by(Global.Company.Key)%>%
+  mutate(RD.lag.1=dplyr::lag(Research.and.Development.Expense,n=1,default=NA),
+         RD.lag.3=dplyr::lag(Research.and.Development.Expense,n=3,default=NA))
+```
+
+**Return on Asset**
+The second variable of interest is the return on asset variable (ROA) which is usually calculated by dividing a company's net income by the average total assets.
+
+Mathematically this can be expressed as:
+
+$ROA= Net Income/Average Total Asset$
+
+To get the average total assets we add the previous years's ending total assets to the current year's ending total assets and dividing the result by two. To code to do this is presented below:
+
+```{r}
+# remove NA'S
+rd.data3 <- rd.data3 %>% filter(!is.na(Net.Income..Loss.) & !is.na(Assets...Total))
+
+
+# create Total Asset lag variable
+rd.data3<-rd.data3%>%arrange(Global.Company.Key,Data.Year...Fiscal)
+rd.data3<-rd.data3%>%
+  group_by(Global.Company.Key)%>%
+  mutate(Assets.Total.lag1 = dplyr::lag(Assets...Total, n = 1, default = NA))
+
+#create variable ROA
+rd.data3<- rd.data3%>%
+  mutate(ROA=ifelse((Assets...Total+Assets.Total.lag1)!=0,
+                    (Net.Income..Loss./(Assets...Total+Assets.Total.lag1)/2),
+                    NA))
+```
+
+**Company Size**
+To obtain the company size, we will take the natural logarithm of Total Asset using the code below:
+```{r}
+rd.data3<-rd.data3%>%
+  mutate(size = ifelse(Assets...Total>0,
+                       log(Assets...Total),
+                       NA))
+```
+
+**Leverage**
+
+Leverage is the ratio of a company's loan capital (debt) to the value of its ordinary shares. In our study the company's loan capital is the Liabilities...total while the ordinary shares is the Assets...Total. So we compute the leverage using the code below:
+
+```{r}
+rd.data3<-rd.data3%>%
+  mutate(leverage = ifelse(Assets...Total>0,
+                       (Liabilities...Total/Assets...Total),
+                       NA))
+```
+
+**Growth**
+
+Growth of sales is a proxy for growth of the company and can be calculated as the current period's sales minus last year sales to sales of the previous period
+
+```{r}
+
+rd.data3<-rd.data3%>%
+  group_by(Global.Company.Key)%>%
+  mutate(sale.lag1 = dplyr::lag(Revenue...Total, n = 1, default = NA))
+
+rd.data3<-rd.data3%>%
+  mutate(growth = ifelse(sale.lag1!=0,
+                       (Revenue...Total-sale.lag1)/sale.lag1,
+                       NA))
+```
+
+**R&D Intensity**
+
+The most important predictor variable in this study is research and development variable. We will denote this variable by using the R&D Intensity which can be obtained by finding the ratio of R&D expenditures to total net sales of the company. The code for doing that is presented below:
+
+```{r}
+
+rd.data3<- rd.data3 %>% filter(!is.na(Research.and.Development.Expense))
+
+rd.data3<-rd.data3%>%
+  mutate(RD_Intensity = ifelse(Net.Income..Loss.!=0,
+                      Research.and.Development.Expense/Net.Income..Loss.,
+                       NA))
+
+# Lagged variable (t-1)
+rd.data3 <-rd.data3  %>%
+   group_by(Global.Company.Key)%>%
+   mutate(RD_Intensity1 = dplyr::lag(RD_Intensity, n = 1, default = NA),RD_Intensity3 = dplyr::lag(RD_Intensity, n = 3, default = NA))%>%
+  mutate(Diff_RD_Intensity = RD_Intensity - RD_Intensity1)
+```
+
+## CHECKING IF DATA IS READY FOR ANALYSIS
+Many assumptions are required in the preprocessing phase of data analysis to make the data analysis-ready. We have done some of this in the wrangling section; but to be sure we dont have issues with outliers, homoscedasticity and non-normality
+
+```{r}
+summary(rd.data3)
+```
+The current state of our data indicates that there are several missing values which we need to do away with, this can be done by the code below:
+
+```{r}
+rd.data3 = na.omit(rd.data3)
+describe(rd.data3)
+```
+
+## To what extent are firm’s investments in R&D static or dynamic over time?
+```{r, fig.height= 10, warning=FALSE , fig.width=12, message=F}
+attach(rd.data3)
+plotmeans(RD_Intensity ~ Data.Year...Fiscal, main = "Average Research and Development Intensity across the years", n.label = FALSE,mean.labels = FALSE)
+
+```
+It is evident from the means plot that the average research and development investment intensity across the companies does not show any trend pattern i.e. there is not regular upward (increase) or downward (decrease) effect in the distribution; however the peak R&D intensity is noticed in the year 2011 folled by the year 2002 while the least investment is noticed in the year 2014 followed by 2003.
+Since the pattern of the curve doesn't ascertain the dynamicity of R&D intensity, we will confirm by modeling the short term and the long term using 1 year lagged R&D intensity and 3 years lagged R&D intensity. Both of this variables have been generated in the variable generation section. The required model that will reveal this result  is the panel data model where will will model the R&D intensity on it own previous values (1-lag for short term and 3-lag for long term). The code that yielded the model is given below:
+
+```{r, message=FALSE,warning=FALSE}
+Stationary.test <- adf.test(rd.data3$RD_Intensity)      #Testing stationarity of the dependent variable
+print(Stationary.test)                                  # To print the result of the stationarity test
+
+RDS.Fixed<-plm(RD_Intensity~RD_Intensity1+RD_Intensity3, data=rd.data3, model="within")  #Fixed effect model 
+RDS.Random<-plm(RD_Intensity~RD_Intensity1+RD_Intensity3, data=rd.data3, model="random")  #random effect model
+phtest(RDS.Fixed,RDS.Random)                   # Hausman's test
+stargazer(RDS.Fixed,RDS.Random, type="text",title = "Panel data model to test for longrun and short run dynamicity",column.labels = c("Fixed","Random")) # print result neatly
+
+```
+
+The stationary.test model is used to check the stationarity of the R&D intensity variable without considering the impact of varying companies over the year. The result obtain indicates that the mean and variance is constant across the year for the distribution of R&D intensity under study. The resulting stationary test yield a p.value of 0.01 which inidicates that we will reject the null hypothesis of non-stationary.
+To confirm if this is the same across varying company level and time for both the long run and the short run dynamicity, we fitted two panel data models (fixed effect and random effect model) and confirm which is best fit for our data using the Hausman's test. The result of the Hausman's test yielded a p-valu of 0.4313, indicating that we do not have enough evidence to reject the null hypothesis that the random effect model is the best model. Thus we are certain that the random effect model is better compared to the fixed effect model in this case.
+Interpreting the random effect model, we can see that the coefficient of the RD_Intensity1 is 0.013 and RD_Intensity3 is 0.006 which are both not significant even at 90% level of confidence; Thus we can say that the R&D investment is not dynamic both in the short run (1 year) and in the long run (3 years)
+
+
+```{r}
+variables1 = c("Data.Year...Fiscal", "Company.Name" , "RD_Intensity","leverage","size","growth","ROA" )                     #This are the variables of interest
+
+Paneldata = rd.data3 %>% select(variables1) %>% data.frame()   # to Select the variables needed in the panel data
+
+Paneldatareal =pdata.frame(Paneldata, index = c("Data.Year...Fiscal","Company.Name"))    # to make empty panel dataframe to be filled by the crossectional variables later
+
+MyfinalPanel = Paneldatareal[c("RD_Intensity","leverage","size")]  # fill the empty panel dataframe with two crossectional variables
+
+head(MyfinalPanel)     # to view the first six rows of the panel data
+
+Panel.diff = transform(Paneldata, P1d = fn$ave(RD_Intensity, Company.Name, FUN = ~ c(NA, diff(x))))   # To find the first difference across various company time series
+
+Panel.diff$Neg.feedback = ifelse(Panel.diff$P1d < 0, Panel.diff$P1d, 0)   # to compute the negative feedback variable and include it in the dataset
+Panel.diff$Pos.feedback = ifelse(Panel.diff$P1d > 0, Panel.diff$P1d, 0)   # to compute the positive feedback variable and include it in the dataset
+Panel.diff = na.omit(Panel.diff)   # to remove NA's introduced because of first differences
+headTail(Panel.diff)  # to have an overview of the data
+```
+
+
+## To what extent does firms’ performance below their historical aspiration level induce change in R&D investment?
+```{r, message=F, warning=F}
+hypothesis2.Fixed<-plm(RD_Intensity~Neg.feedback+leverage+size, data=Panel.diff, model="within")
+
+hypothesis2.Random<-plm(RD_Intensity~Neg.feedback+leverage+size, data=Panel.diff, model="random")
+phtest(hypothesis2.Fixed,hypothesis2.Random)
+stargazer(hypothesis2.Fixed,hypothesis2.Random, type="text", report=("vc*t"))
+```
+To know the impact of negative feedback of R&D intensity, we model the negative impact on R&D intensity and include leverage and company size as control variables using both the fixed and random effect model. The resulf of Hausman's test reveals a p-value of 2.2*10-16 which indicates that the fixed effect model is more apprepriate in this context. 
+Thus interpreting the result of the Fixed effect model, it is evident that Negative feedback has a coefficient of 0.387 on R&D intensity while controlling for leverage and company size. This means that for every 1 unit increase 1000 negative feedback, we expect the company to increase their R&D investment by only 387 units. This coefficient is has a t-statistics of 23.437 which is significant at 99% level of confidence.
+
+## To what extent does increasing R&D investment spur organizational performance?
+The theory suggests that R&D investment would be increase level of innovation in organizations leading to firms experiencing higher performance. Therefore, should the relationship between R&D investments and firm performance be linearly positive, it implies that investment in R&D will persistently yield profits to the firm.
+
+```{r, warning=FALSE, message=FALSE}
+
+ROA_fm<-plm(ROA~RD_Intensity+(RD_Intensity)^2+leverage*size*growth, data=Panel.diff, model="within")
+
+ROA_rm<-plm(ROA~RD_Intensity+(RD_Intensity)^2+leverage*size*growth, data=Panel.diff, model="random")
+
+phtest(ROA_fm,ROA_rm)
+
+stargazer(ROA_fm,ROA_rm, type="text", report=("vc*t"), column.labels = c('Fixed','Random'))
+```
+
+To analyze the impact of increasing R&D investment spur organizational performance, we formulate a long panel data model which include the R&D_intensity and other factors. 
+The Hausman's test of the long panel data model has a p-value of 2.2*10^16 which indicates that the fixed effect model is more efficient to interprete in this context.
+Sticking to the fixed effect model, it is evident that R&D intensity doesnt have any significant impact on return on asset provided leverage, size and growth are controlled for since the t-statistics of 0.408 is not significant 95% level of confidence.
+On the other hand the impact of leverage is significantly negative and it will reduce the return on asset by 45 unit for every 1000 unit increase in it (leverage).
+Similarly size and growth are positively significant as they both will increase return on asset by 13 unit and 41 unit respectively for 1000 unit increase in each.
+Thinking of the effect of the interaction of this controlled variables, it is evident from the model if leverage and size of the company were to increase simultaneously by 1000unit, it will result in 4 unit increase in ROA, however if the leverage were to increase simultaneously with increase in growth rate of the company by 1000 units, there will be an observed 9 units decrease in return on asset of the company.
+Also if the size of the company is to expand simultaneously with the growth rate, there might be an unnoticeable (non-significant) reduction in return on asset by only 1 unit per 1000. Finally, if a company has increase leverage, expanding size and growth simultaneously, this will result in a decrease of 6 unit per every 1000 units.
+
+## Recommendation
+Based on the result obtained in the analysis, we recommend that:
+1. R&D investment should be improved to aid increase in organisation performance.
+2. Also R&D investment should be improved to lower the negative feedback rate which will in turn motive investment in the proceeding year.
